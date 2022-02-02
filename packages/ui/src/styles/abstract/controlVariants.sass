@@ -39,9 +39,14 @@
 	&.view-seamless
 		background: transparent
 		border-color: transparent
+		padding-left: 0
+		padding-right: 0
 
 		&:focus
 			background: var(--cui-background-color--above)
+			box-shadow: none
+		&:focus-within
+			--input-control--background: var(--cui-background-color--above)
 			box-shadow: none
 		&:hover
 			background: var(--cui-background-color--above)
