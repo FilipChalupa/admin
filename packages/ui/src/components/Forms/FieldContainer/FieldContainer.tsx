@@ -18,6 +18,7 @@ export interface FieldContainerProps extends ErrorListProps {
 	labelDescription?: ReactNode // Expands on the label e.g. to provide the additional explanation
 	description?: ReactNode // Can explain e.g. the kinds of values to be filled
 
+	required?: boolean
 	useLabelElement?: boolean
 }
 
