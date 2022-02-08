@@ -1,220 +1,405 @@
 import classNames from 'classnames'
 import {
 	createContext,
-	MouseEvent as ReactMouseEvent,
-	PureComponent,
-	ReactNode,
+	forwardRef,
+	FunctionComponent,
+	KeyboardEvent,
+	KeyboardEventHandler,
+	memo,
+	ReactNode, SyntheticEvent,
 	useCallback,
 	useContext,
+	useEffect,
+	useMemo,
+	useRef,
 	useState,
 } from 'react'
-import { useClassNamePrefix } from '../../auxiliary'
-import { GlobalClassNamePrefixContext } from '../../contexts'
+import { useComponentClassName } from '../../auxiliary'
 import { useNavigationLink } from '../../Navigation'
-import { isSpecialLinkClick, toViewClass } from '../../utils'
+import { isSpecialLinkClick, toStateClass, toViewClass } from '../../utils'
 import { Collapsible } from '../Collapsible'
-import { Label, LabelOwnProps } from '../Typography'
+import { usePreventCloseContext } from '../PreventCloseContext'
+import { Label } from '../Typography'
 
 const DepthContext = createContext(0)
 
-class Menu extends PureComponent<Menu.Props> {
-	public static displayName = 'Menu'
+const randomId = () => (Math.random() + 1).toString(36).substring(7)
 
-	public override render() {
-		return (
-			<DepthContext.Provider value={0}>
-				<GlobalClassNamePrefixContext.Consumer>
-					{prefix => (
-						<section className={classNames(`${prefix}menu`, toViewClass('showCaret', this.props.showCaret ?? true))}>
-							<ul className={`${prefix}menu-list`}>{this.props.children}</ul>
-						</section>
-					)}
-				</GlobalClassNamePrefixContext.Consumer>
-			</DepthContext.Provider>
-		)
-	}
+const FocusContext = createContext<{
+	nextFocusable: () => HTMLLIElement | null
+	previousFocusable: () => HTMLLIElement | null
+	mouseIsActive: boolean
+}>({
+	nextFocusable: () => null,
+	previousFocusable: () => null,
+	mouseIsActive: false,
+})
+
+function useFocusContext() {
+	return useContext(FocusContext)
 }
 
-namespace Menu {
-	export interface Props {
-		children?: ReactNode
-		showCaret?: boolean
+function getFocusableItems<E extends HTMLElement = HTMLElement>(parent: E): HTMLLIElement[] {
+	return Array.from(parent.querySelectorAll('li[tabindex="0"]'))
+}
+
+function getClosestFocusable<E extends HTMLElement = HTMLElement>(parent: E, offset: number) {
+	if (!document.activeElement) {
+		return null
 	}
 
-	export interface ItemProps<T extends any = any> {
-		children?: ReactNode
-		title?: string | ReactNode
-		to?: T
-		href?: string
-		external?: boolean
-		expandedByDefault?: boolean
+	if (!(document.activeElement instanceof HTMLLIElement)) {
+		return null
 	}
 
-	type TitleProps = {
-		children?: ReactNode
-		className?: string
-	} & Omit<LabelOwnProps, 'children'> & (
-		  {
-				onClick?: never
-				href?: never
-				external?: never
-				suppressTo?: never
-		  }
-		| {
-				onClick?: (e: ReactMouseEvent<HTMLElement>) => void
-				href?: string
-				external?: boolean
-				suppressTo?: boolean
-		  }
-	)
+	const list = getFocusableItems(parent)
+	const currentlyFocusedIndex = list.indexOf(document.activeElement)
 
-	function DepthSpecificItem(props: ItemProps) {
-		const depth = useContext(DepthContext)
+	return list[currentlyFocusedIndex + offset] ?? null
+}
 
-		if (depth === 1) {
-			return <GroupItem {...props} />
-		} else if (depth === 2) {
-			return <SubGroupItem {...props} />
-		} else if (depth === 3 || depth === 4) {
-			return <ActionItem {...props} />
-		} else {
-			return <TooDeepItem {...props} />
+export interface MenuProps {
+	children?: ReactNode
+	showCaret?: boolean
+}
+
+export interface ItemProps<T extends any = any> {
+	children?: ReactNode
+	title?: string | ReactNode
+	to?: T
+	href?: string
+	external?: boolean
+	expandedByDefault?: boolean
+}
+
+interface MenuLinkProps {
+	href: string
+	onClick?: (e: SyntheticEvent<HTMLElement>) => void
+	suppressTo: boolean
+	isActive?: boolean
+	className?: string
+	external?: boolean | undefined
+	children?: ReactNode
+}
+
+function MenuLink({ className, children, external, href, isActive, onClick: onNavigate, suppressTo }: MenuLinkProps) {
+	const onClick = useCallback((event: SyntheticEvent<HTMLAnchorElement>) => {
+		if (event.nativeEvent instanceof MouseEvent && !isSpecialLinkClick(event.nativeEvent)) {
+			onNavigate?.(event)
+
+			if (suppressTo) {
+				event.preventDefault()
+			}
 		}
-	}
+	}, [onNavigate, suppressTo])
 
-	function Title(props: TitleProps) {
-		const content = <Label size={props.size} isActive={props.isActive}>{props.children}</Label>
+	return <a
+		tabIndex={-1}
+		className={classNames(className, toStateClass('active', isActive))}
+		href={href}
+		onClick={onClick}
+		target={external ? '_blank' : undefined}
+		rel={external ? 'noopener noreferrer' : undefined}
+	>
+		{children}
+	</a>
+}
 
-		if (props.href) {
-			const onClick = (event: ReactMouseEvent<HTMLAnchorElement>) => {
-				if (props.onClick && !isSpecialLinkClick(event.nativeEvent)) {
-					props.onClick(event)
-					if (props.suppressTo) {
-						event.preventDefault()
-					}
-				}
+interface ToggleProps {
+	controls: string
+	disabled: boolean
+	checked: boolean
+	onChange: (checked: boolean) => void
+}
+
+const Toggle = memo(forwardRef<HTMLButtonElement, ToggleProps>(({
+	controls,
+	checked,
+	disabled,
+	onChange,
+}, ref) => {
+	const componentClassName = useComponentClassName('menu-expand-toggle')
+
+	return <button
+		tabIndex={-1}
+		ref={ref}
+		type="button"
+		disabled={disabled}
+		className={classNames(
+			componentClassName,
+			toStateClass('collapsed', !checked),
+		)}
+		aria-haspopup="true"
+		aria-controls={controls}
+		aria-expanded={checked}
+		onClick={useCallback(event => {
+			onChange(!checked)
+		}, [checked, onChange])}
+		onKeyPress={useCallback(event => {
+			switch (event.code) {
+				case 'ArrowRight': onChange(true)
+					break
+				case 'ArrowLeft': onChange(false)
+					break
+			}
+		}, [onChange])}
+	>
+		<span className={`${componentClassName}-label`}>{checked ? '-' : '+'}</span>
+	</button>
+}))
+
+export function Item({ children, ...props }: ItemProps) {
+	const depth = useContext(DepthContext)
+
+	const { isActive, href, navigate } = useNavigationLink(props.to, props.href)
+
+	const hasSubItems = !!children
+	const isInteractive = hasSubItems && depth > 0
+	const tabIndex = (depth > 0 && hasSubItems) || href ? 0 : -1
+
+	const [expanded, setExpanded] = useState(!!props.expandedByDefault || depth === 0 || !props.title)
+	const preventMenuClose = usePreventCloseContext()
+
+	const onLabelClick = useCallback((event: SyntheticEvent) => {
+		if (event.defaultPrevented) {
+			return
+		}
+
+		if (isInteractive && !expanded) {
+			preventMenuClose()
+		}
+
+		if (navigate) {
+			navigate(event)
+			isInteractive && setExpanded(true)
+		} else {
+			isInteractive && setExpanded(!expanded)
+		}
+
+		event.preventDefault()
+	}, [expanded, isInteractive, navigate, preventMenuClose])
+
+	const changeExpand = useCallback((nextExpanded: boolean) => {
+		if (!isInteractive) {
+			return
+		}
+
+		if (nextExpanded === false)	{
+			listItemRef.current?.focus()
+		}
+
+		setExpanded(nextExpanded)
+	}, [isInteractive])
+
+	const id = useRef(`cui-menu-id-${randomId()}`)
+	const listItemRef = useRef<HTMLLIElement>(null)
+	const listItemTitleRef = useRef<HTMLDivElement>(null)
+
+	const { nextFocusable, previousFocusable, mouseIsActive } = useFocusContext()
+
+	useEffect(() => {
+		if (tabIndex < 0 || !listItemTitleRef.current || !listItemRef.current) {
+			return
+		}
+
+		const liRef = listItemRef.current
+		const titleRef = listItemTitleRef.current
+
+		const mouseOverListener = (event: MouseEvent) => {
+			if (event.defaultPrevented || !mouseIsActive || liRef === document.activeElement) {
+				return
 			}
 
-			return (
-				<a
-					className={props.className}
-					href={props.href}
-					onClick={onClick}
-					target={props.external ? '_blank' : undefined}
-					rel={props.external ? 'noopener noreferrer' : undefined}
-					children={content}
-				/>
-			)
-
-		} else if (props.onClick) {
-			return (
-				<button type="button" onClick={props.onClick} className={props.className}>
-					{content}
-				</button>
-			)
-
-		} else {
-			return <div className={props.className}>{content}</div>
+			liRef.focus()
+			event.preventDefault()
 		}
-	}
 
-	function ItemWrapper(props: {
-		children?: ReactNode
-		className: string
-		isActive?: boolean
-	}) {
-		return <li className={classNames(props.className, props.isActive && 'is-active')}>{props.children}</li>
-	}
-
-	function GroupItem(props: ItemProps) {
-		const { isActive, href, navigate } = useNavigationLink(props.to, props.href)
-		const prefix = useClassNamePrefix()
-		return (
-			<ItemWrapper className={`${prefix}menu-group`} isActive={isActive}>
-				{props.title && <Title href={href} onClick={navigate} size="small" className={`${prefix}menu-group-title`}>{props.title}</Title>}
-				{props.children && <ul className={`${prefix}menu-group-list`}>{props.children}</ul>}
-			</ItemWrapper>
-		)
-	}
-
-	function SubGroupItem(props: ItemProps) {
-		const [expanded, setExpanded] = useState(!!props.expandedByDefault)
-		const { isActive, href, navigate } = useNavigationLink(props.to, props.href)
-		const onClick = useCallback((e: ReactMouseEvent) => {
-			setExpanded(!expanded)
-			navigate?.(e)
-		}, [setExpanded, expanded, navigate])
-		const options: TitleProps = {
-			isActive,
-			onClick: onClick,
-			external: props.external,
-			suppressTo: expanded,
-			href,
+		const mouseOutListener = (event: MouseEvent) => {
+			liRef.blur()
 		}
-		const prefix = useClassNamePrefix()
-		const expandedClass = props.children && (expanded ? 'is-expanded' : 'is-collapsed')
 
-		return (
-			<ItemWrapper
-				className={classNames(
-					`${prefix}menu-subgroup`,
-					expandedClass,
-				)}
-				isActive={isActive && !props.children}
-			>
-				{props.title && <Title {...options} className={classNames(
-					`${prefix}menu-subgroup-title`,
-					props.children ? 'has-children' : undefined,
-					expandedClass,
-				)}>{props.title}</Title>}
-				{props.children && (
-					<Collapsible expanded={expanded}>
-						<ul className={`${prefix}menu-subgroup-list`}>{props.children}</ul>
-					</Collapsible>
-				)}
-			</ItemWrapper>
-		)
-	}
+		titleRef.addEventListener('mouseover', mouseOverListener)
+		titleRef.addEventListener('mouseout', mouseOutListener)
 
-	function ActionItem(props: ItemProps) {
-		const { isActive, href, navigate } = useNavigationLink(props.to, props.href)
-		const prefix = useClassNamePrefix()
-		return (
-			<ItemWrapper className={`${prefix}menu-action`} isActive={isActive}>
-				{props.title && <Title isActive={isActive} href={href} onClick={navigate} external={props.external} className={classNames(
-					`${prefix}menu-action-title`,
-					props.children ? 'has-children' : undefined,
-					props.children ? 'is-expanded' : undefined,
-				)}>{props.title}</Title>}
-				{props.children && <ul className={`${prefix}menu-action-list`}>{props.children}</ul>}
-			</ItemWrapper>
-		)
-	}
+		return () => {
+			titleRef.removeEventListener('mouseover', mouseOverListener)
+			titleRef.removeEventListener('mouseout', mouseOutListener)
+		}
+	}, [mouseIsActive, tabIndex])
 
-	function TooDeepItem(props: ItemProps) {
-		const { isActive, href, navigate } = useNavigationLink(props.to, props.href)
-		const prefix = useClassNamePrefix()
-		return (
-			<ItemWrapper className={`${prefix}menu-tooDeep`} isActive={isActive}>
-				{props.title && <Title isActive={isActive} href={href} onClick={navigate} external={props.external}  className={classNames(
-					`${prefix}menu-tooDeep-title`,
-					props.children ? 'has-children' : undefined,
-					props.children ? 'is-expanded' : undefined,
-				)}>{props.title}</Title>}
-				{props.children && <ul className={`${prefix}menu-tooDeep-list`}>{props.children}</ul>}
-			</ItemWrapper>
-		)
-	}
+	const onKeyPress = useCallback<KeyboardEventHandler<HTMLLIElement>>((event: KeyboardEvent<HTMLLIElement>) => {
+		if (!listItemRef.current || event.defaultPrevented) {
+			return
+		}
 
-	export function Item(props: ItemProps) {
-		const depth = useContext(DepthContext)
+		if (document.activeElement !== listItemRef.current) {
+			if (depth > 0 && event.code === 'ArrowLeft' && expanded) {
+				changeExpand(false)
+				listItemRef.current.focus()
+				event.preventDefault()
+			}
 
-		return (
-			<DepthContext.Provider value={depth + 1}>
-				<DepthSpecificItem {...props} />
-			</DepthContext.Provider>
-		)
-	}
+			return
+		}
+
+		switch (event.code) {
+			case 'ArrowLeft':
+				if (expanded) {
+					changeExpand(false)
+				} else {
+					previousFocusable()?.focus()
+				}
+				event.preventDefault()
+				break
+			case 'ArrowRight':
+				if (!expanded && isInteractive) {
+					changeExpand(true)
+				} else {
+					nextFocusable()?.focus()
+				}
+				event.preventDefault()
+				break
+			case 'Space':
+				changeExpand(!expanded)
+				event.preventDefault()
+				break
+			case 'Enter':
+				onLabelClick(event)
+				event.preventDefault()
+				break
+			case 'ArrowUp':
+				previousFocusable()?.focus()
+				event.preventDefault()
+				break
+			case 'ArrowDown':
+				nextFocusable()?.focus()
+				event.preventDefault()
+				break
+		}
+	}, [changeExpand, depth, expanded, isInteractive, nextFocusable, onLabelClick, previousFocusable])
+
+	const componentClassName = useComponentClassName(depth === 0 ? 'menu-section' : 'menu-group')
+
+	return <DepthContext.Provider value={depth + 1}>
+		<li
+			tabIndex={tabIndex}
+			ref={listItemRef}
+			className={classNames(
+				componentClassName,
+				hasSubItems && (expanded ? 'is-expanded' : 'is-collapsed'),
+				toStateClass('interactive', isInteractive),
+			)}
+			onKeyDown={onKeyPress}
+			aria-haspopup="true"
+			aria-controls={id.current}
+			aria-expanded={expanded}
+		>
+			{props.title && <div ref={listItemTitleRef} className={`${componentClassName}-title`}>
+					<Toggle
+						checked={expanded}
+						controls={id.current}
+						disabled={!isInteractive}
+						onChange={changeExpand}
+					/>
+					{href
+					? <MenuLink
+							className={`${componentClassName}-title-content`}
+							external={props.external}
+							href={href}
+							isActive={isActive}
+							onClick={onLabelClick}
+							suppressTo={expanded}
+						>
+							<Label className={`${componentClassName}-title-label`}>{props.title}</Label>
+						</MenuLink>
+					: <span
+							className={`${componentClassName}-title-content`}
+							onClick={onLabelClick}
+						>
+							<Label className={`${componentClassName}-label`}>{props.title}</Label>
+						</span>}
+				</div>}
+			{children && (
+				<Collapsible expanded={expanded}>
+					<ul aria-labelledby={id.current} className={`${componentClassName}-list`}>{expanded ? children : undefined}</ul>
+				</Collapsible>
+			)}
+		</li>
+	</DepthContext.Provider>
 }
 
-export { Menu }
+export const Menu: FunctionComponent<MenuProps> & {
+	Item: any
+} = (props: MenuProps) => {
+	const componentClassName = useComponentClassName('menu')
+	const menuRef = useRef<HTMLUListElement>(null)
+
+	const [mouseIsActive, setMouseIsActive] = useState(false)
+
+	const nextFocusable = useCallback((): HTMLLIElement | null => {
+		if (!menuRef.current) {
+			return null
+		}
+
+		return getClosestFocusable(menuRef.current, 1)
+	}, [])
+
+	const previousFocusable = useCallback((): HTMLLIElement | null => {
+		if (!menuRef.current) {
+			return null
+		}
+
+		return getClosestFocusable(menuRef.current, -1)
+	}, [])
+
+	const coordinates = useRef<[number | undefined, number | undefined]>([undefined, undefined])
+	const movingTimeout = useRef<number>(0)
+
+	useEffect(() => {
+		if (!menuRef.current) {
+			return
+		}
+
+		const menu = menuRef.current
+
+		const mouseMoveListener = (event: MouseEvent) => {
+			const [x, y] = coordinates.current
+
+			if (x && y && (event.x !== x || event.y !== y)) {
+				setMouseIsActive(true)
+
+				window.clearTimeout(movingTimeout.current)
+				movingTimeout.current = window.setTimeout(() => {
+					setMouseIsActive(false)
+				}, 300)
+			}
+
+			coordinates.current = [event.x, event.y]
+		}
+
+		menu.addEventListener('mousemove', mouseMoveListener)
+
+		return () => {
+			menu.removeEventListener('mousemove', mouseMoveListener)
+		}
+	}, [])
+
+	return <DepthContext.Provider value={0}>
+		<section className={classNames(
+			componentClassName,
+			toViewClass('showCaret', props.showCaret ?? true),
+		)}>
+			<ul ref={menuRef} className={`${componentClassName}-list`}>
+				<FocusContext.Provider value={useMemo(() => ({
+					nextFocusable,
+					previousFocusable,
+					mouseIsActive,
+				}), [nextFocusable, mouseIsActive, previousFocusable])}>
+					{props.children}
+				</FocusContext.Provider>
+			</ul>
+		</section>
+	</DepthContext.Provider>
+}
+
+Menu.Item = Item
